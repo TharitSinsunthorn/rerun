@@ -68,12 +68,14 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
         # Define a mapping for transforms
         self.path_to_frame = {
-            "map": "map",
-            "map/points": "camera_depth_frame",
-            "map/robot": "base_footprint",
-            "map/robot/scan": "base_scan",
-            "map/robot/camera": "camera_rgb_optical_frame",
-            "map/robot/camera/points": "camera_depth_frame",
+            "world": "world",
+            "world/points": "depth_cam",
+            "world/robot": "base_link",
+            "world/robot/depth_camera/points": "depth_cam",
+            # "world/robot/left_camera": "NavCam_left",
+            # "world/robot/left_camera/points": "camera_depth_frame",
+            # "world/robot/right_camera": "NavCam_right",
+            # "world/robot/right_camera/points": "camera_depth_frame",
         }
 
         # Assorted helpers for data conversions
@@ -82,17 +84,17 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
         self.laser_proj = laser_geometry.laser_geometry.LaserProjection()
 
         # Log a bounding box as a visual placeholder for the map
-        # # TODO(jleibs): Log the real map once [#1531](https://github.com/rerun-io/rerun/issues/1531) is merged
-        rr.log(
-            "map/box",
-            rr.Boxes3D(half_sizes=[3, 3, 1], centers=[0, 0, 1], colors=[255, 255, 255, 255]),
-            static=True,
-        )
+        # TODO(jleibs): Log the real map once [#1531](https://github.com/rerun-io/rerun/issues/1531) is merged
+        # rr.log(
+        #     "world/box",
+        #     rr.Boxes3D(half_sizes=[3, 3, 1], centers=[0, 0, 1], colors=[255, 255, 255, 255]),
+        #     static=True,
+        # )
 
         # Subscriptions
         self.info_sub = self.create_subscription(
             CameraInfo,
-            "/intel_realsense_r200_depth/camera_info",
+            "/depth_cam/camera_info",
             self.cam_info_callback,
             10,
             callback_group=self.callback_group,
@@ -108,7 +110,7 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
         self.img_sub = self.create_subscription(
             Image,
-            "/intel_realsense_r200_depth/image_raw",
+            "/depth_cam/rgb",
             self.image_callback,
             10,
             callback_group=self.callback_group,
@@ -116,28 +118,28 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
         self.points_sub = self.create_subscription(
             PointCloud2,
-            "/intel_realsense_r200_depth/points",
+            "/depth_cam/depth_pcl",
             self.points_callback,
             10,
             callback_group=self.callback_group,
         )
 
-        self.scan_sub = self.create_subscription(
-            LaserScan,
-            "/scan",
-            self.scan_callback,
-            10,
-            callback_group=self.callback_group,
-        )
+        # self.scan_sub = self.create_subscription(
+        #     LaserScan,
+        #     "/scan",
+        #     self.scan_callback,
+        #     10,
+        #     callback_group=self.callback_group,
+        # )
 
         # The urdf is published as latching
-        self.urdf_sub = self.create_subscription(
-            String,
-            "/robot_description",
-            self.urdf_callback,
-            qos_profile=latching_qos,
-            callback_group=self.callback_group,
-        )
+        # self.urdf_sub = self.create_subscription(
+        #     String,
+        #     "/robot_description",
+        #     self.urdf_callback,
+        #     qos_profile=latching_qos,
+        #     callback_group=self.callback_group,
+        # )
 
     def log_tf_as_transform3d(self, path: str, time: Time) -> None:
         """
@@ -155,7 +157,7 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
         # Do the TF lookup to get transform from child (source) -> parent (target)
         try:
-            tf = self.tf_buffer.lookup_transform(parent_frame, child_frame, time, timeout=Duration(seconds=0.1))
+            tf = self.tf_buffer.lookup_transform(parent_frame, child_frame, time, timeout=Duration(nanoseconds=100000000))
             t = tf.transform.translation
             q = tf.transform.rotation
             rr.log(path, rr.Transform3D(translation=[t.x, t.y, t.z], rotation=rr.Quaternion(xyzw=[q.x, q.y, q.z, q.w])))
@@ -170,7 +172,7 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
         self.model.fromCameraInfo(info)
 
         rr.log(
-            "map/robot/camera/img",
+            "world/robot/depth_camera/img",
             rr.Pinhole(
                 resolution=[self.model.width, self.model.height],
                 image_from_camera=self.model.intrinsicMatrix(),
@@ -194,8 +196,8 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
         time = Time.from_msg(img.header.stamp)
         rr.set_time_nanos("ros_time", time.nanoseconds)
 
-        rr.log("map/robot/camera/img", rr.Image(self.cv_bridge.imgmsg_to_cv2(img)))
-        self.log_tf_as_transform3d("map/robot/camera", time)
+        rr.log("world/robot/camera/img", rr.Image(self.cv_bridge.imgmsg_to_cv2(img)))
+        self.log_tf_as_transform3d("world/robot/camera", time)
 
     def points_callback(self, points: PointCloud2) -> None:
         """Log a `PointCloud2` with `log_points`."""
@@ -220,52 +222,52 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
         # Log points once rigidly under robot/camera/points. This is a robot-centric
         # view of the world.
-        rr.log("map/robot/camera/points", rr.Points3D(pts, colors=colors))
-        self.log_tf_as_transform3d("map/robot/camera/points", time)
+        rr.log("world/robot/camera/points", rr.Points3D(pts, colors=colors))
+        self.log_tf_as_transform3d("world/robot/camera/points", time)
 
         # Log points a second time after transforming to the map frame. This is a map-centric
         # view of the world.
         #
         # Once Rerun supports fixed-frame aware transforms [#1522](https://github.com/rerun-io/rerun/issues/1522)
         # this will no longer be necessary.
-        rr.log("map/points", rr.Points3D(pts, colors=colors))
-        self.log_tf_as_transform3d("map/points", time)
+        rr.log("world/points", rr.Points3D(pts, colors=colors))
+        self.log_tf_as_transform3d("world/points", time)
 
-    def scan_callback(self, scan: LaserScan) -> None:
-        """
-        Log a LaserScan after transforming it to line-segments.
+    # def scan_callback(self, scan: LaserScan) -> None:
+    #     """
+    #     Log a LaserScan after transforming it to line-segments.
 
-        Note: we do a client-side transformation of the LaserScan data into Rerun
-        points / lines until Rerun has native support for LaserScan style projections:
-        [#1534](https://github.com/rerun-io/rerun/issues/1534)
-        """
-        time = Time.from_msg(scan.header.stamp)
-        rr.set_time_nanos("ros_time", time.nanoseconds)
+    #     Note: we do a client-side transformation of the LaserScan data into Rerun
+    #     points / lines until Rerun has native support for LaserScan style projections:
+    #     [#1534](https://github.com/rerun-io/rerun/issues/1534)
+    #     """
+    #     time = Time.from_msg(scan.header.stamp)
+    #     rr.set_time_nanos("ros_time", time.nanoseconds)
 
-        # Project the laser scan to a collection of points
-        points = self.laser_proj.projectLaser(scan)
-        pts = point_cloud2.read_points(points, field_names=["x", "y", "z"], skip_nans=True)
-        pts = structured_to_unstructured(pts)
+    #     # Project the laser scan to a collection of points
+    #     points = self.laser_proj.projectLaser(scan)
+    #     pts = point_cloud2.read_points(points, field_names=["x", "y", "z"], skip_nans=True)
+    #     pts = structured_to_unstructured(pts)
 
-        # Turn every pt into a line-segment from the origin to the point.
-        origin = (pts / np.linalg.norm(pts, axis=1).reshape(-1, 1)) * 0.3
-        segs = np.hstack([origin, pts]).reshape(pts.shape[0] * 2, 3)
+    #     # Turn every pt into a line-segment from the origin to the point.
+    #     origin = (pts / np.linalg.norm(pts, axis=1).reshape(-1, 1)) * 0.3
+    #     segs = np.hstack([origin, pts]).reshape(pts.shape[0] * 2, 3)
 
-        rr.log("map/robot/scan", rr.LineStrips3D(segs, radii=0.0025))
-        self.log_tf_as_transform3d("map/robot/scan", time)
+    #     rr.log("map/robot/scan", rr.LineStrips3D(segs, radii=0.0025))
+    #     self.log_tf_as_transform3d("map/robot/scan", time)
 
-    def urdf_callback(self, urdf_msg: String) -> None:
-        """Log a URDF using `log_scene` from `rerun_urdf`."""
-        urdf = rerun_urdf.load_urdf_from_msg(urdf_msg)
+    # def urdf_callback(self, urdf_msg: String) -> None:
+    #     """Log a URDF using `log_scene` from `rerun_urdf`."""
+    #     urdf = rerun_urdf.load_urdf_from_msg(urdf_msg)
 
-        # The turtlebot URDF appears to have scale set incorrectly for the camera-link
-        # Although rviz loads it properly `yourdfpy` does not.
-        orig, _ = urdf.scene.graph.get("camera_link")
-        scale = trimesh.transformations.scale_matrix(0.00254)
-        urdf.scene.graph.update(frame_to="camera_link", matrix=orig.dot(scale))
-        scaled = urdf.scene.scaled(1.0)
+    #     # The turtlebot URDF appears to have scale set incorrectly for the camera-link
+    #     # Although rviz loads it properly `yourdfpy` does not.
+    #     orig, _ = urdf.scene.graph.get("camera_link")
+    #     scale = trimesh.transformations.scale_matrix(0.00254)
+    #     urdf.scene.graph.update(frame_to="camera_link", matrix=orig.dot(scale))
+    #     scaled = urdf.scene.scaled(1.0)
 
-        rerun_urdf.log_scene(scene=scaled, node=urdf.base_link, path="map/robot/urdf", static=True)
+    #     rerun_urdf.log_scene(scene=scaled, node=urdf.base_link, path="map/robot/urdf", static=True)
 
 
 def main() -> None:
@@ -277,12 +279,12 @@ def main() -> None:
     # Any remaining args go to rclpy
     rclpy.init(args=unknownargs)
 
-    turtle_subscriber = PragyaanSubscriber()
+    pragyaan_subscriber = PragyaanSubscriber()
 
     # Use the MultiThreadedExecutor so that calls to `lookup_transform` don't block the other threads
-    rclpy.spin(turtle_subscriber, executor=rclpy.executors.MultiThreadedExecutor())
+    rclpy.spin(pragyaan_subscriber, executor=rclpy.executors.MultiThreadedExecutor())
 
-    turtle_subscriber.destroy_node()
+    pragyaan_subscriber.destroy_node()
     rclpy.shutdown()
 
 
