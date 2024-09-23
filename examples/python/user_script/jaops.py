@@ -31,7 +31,7 @@ try:
     from rclpy.node import Node
     from rclpy.qos import QoSDurabilityPolicy, QoSProfile
     from rclpy.time import Duration, Time
-    from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointField
+    from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointField, Imu
     from sensor_msgs_py import point_cloud2
     from std_msgs.msg import String
     from tf2_ros import TransformException
@@ -71,6 +71,7 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
             "world": "world",
             "world/points": "depth_cam",
             "world/robot": "base_link",
+            "world/robot/depth_camera": "depth_cam",
             "world/robot/depth_camera/points": "depth_cam",
             # "world/robot/left_camera": "NavCam_left",
             # "world/robot/left_camera/points": "camera_depth_frame",
@@ -85,11 +86,11 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
         # Log a bounding box as a visual placeholder for the map
         # TODO(jleibs): Log the real map once [#1531](https://github.com/rerun-io/rerun/issues/1531) is merged
-        # rr.log(
-        #     "world/box",
-        #     rr.Boxes3D(half_sizes=[3, 3, 1], centers=[0, 0, 1], colors=[255, 255, 255, 255]),
-        #     static=True,
-        # )
+        rr.log(
+            "world/box",
+            rr.Boxes3D(half_sizes=[3, 3, 1], centers=[0, 0, 1], colors=[255, 255, 255, 255]),
+            static=True,
+        )
 
         # Subscriptions
         self.info_sub = self.create_subscription(
@@ -100,17 +101,9 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
             callback_group=self.callback_group,
         )
 
-        self.odom_sub = self.create_subscription(
-            Odometry,
-            "/odom",
-            self.odom_callback,
-            10,
-            callback_group=self.callback_group,
-        )
-
         self.img_sub = self.create_subscription(
             Image,
-            "/depth_cam/rgb",
+            "/depth_cam/depth",
             self.image_callback,
             10,
             callback_group=self.callback_group,
@@ -124,22 +117,30 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
             callback_group=self.callback_group,
         )
 
-        # self.scan_sub = self.create_subscription(
-        #     LaserScan,
-        #     "/scan",
-        #     self.scan_callback,
-        #     10,
-        #     callback_group=self.callback_group,
-        # )
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            "odom",
+            self.odom_callback,
+            10,
+            callback_group=self.callback_group,
+        )
 
-        # The urdf is published as latching
-        # self.urdf_sub = self.create_subscription(
-        #     String,
-        #     "/robot_description",
-        #     self.urdf_callback,
-        #     qos_profile=latching_qos,
-        #     callback_group=self.callback_group,
-        # )
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            "odom",
+            self.odom_callback,
+            10,
+            callback_group=self.callback_group,
+        )
+
+        self.imu_sub = self.create_subscription(
+            Imu,
+            "imu",
+            self.imu_callback,
+            10,
+            callback_group=self.callback_group,
+        )
+
 
     def log_tf_as_transform3d(self, path: str, time: Time) -> None:
         """
@@ -179,25 +180,13 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
             ),
         )
 
-    def odom_callback(self, odom: Odometry) -> None:
-        """Update transforms when odom is updated."""
-        time = Time.from_msg(odom.header.stamp)
-        rr.set_time_nanos("ros_time", time.nanoseconds)
-
-        # Capture time-series data for the linear and angular velocities
-        rr.log("odometry/vel", rr.Scalar(odom.twist.twist.linear.x))
-        rr.log("odometry/ang_vel", rr.Scalar(odom.twist.twist.angular.z))
-
-        # Update the robot pose itself via TF
-        self.log_tf_as_transform3d("map/robot", time)
-
     def image_callback(self, img: Image) -> None:
         """Log an `Image` with `log_image` using `cv_bridge`."""
         time = Time.from_msg(img.header.stamp)
         rr.set_time_nanos("ros_time", time.nanoseconds)
 
-        rr.log("world/robot/camera/img", rr.Image(self.cv_bridge.imgmsg_to_cv2(img)))
-        self.log_tf_as_transform3d("world/robot/camera", time)
+        rr.log("world/robot/depth_camera/img", rr.Image(self.cv_bridge.imgmsg_to_cv2(img)))
+        self.log_tf_as_transform3d("world/robot/depth_camera", time)
 
     def points_callback(self, points: PointCloud2) -> None:
         """Log a `PointCloud2` with `log_points`."""
@@ -206,68 +195,42 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
         pts = point_cloud2.read_points(points, field_names=["x", "y", "z"], skip_nans=True)
 
-        # The realsense driver exposes a float field called 'rgb', but the data is actually stored
-        # as bytes within the payload (not a float at all). Patch points.field to use the correct
-        # r,g,b, offsets so we can extract them with read_points.
-        points.fields = [
-            PointField(name="r", offset=16, datatype=PointField.UINT8, count=1),
-            PointField(name="g", offset=17, datatype=PointField.UINT8, count=1),
-            PointField(name="b", offset=18, datatype=PointField.UINT8, count=1),
-        ]
+        # Comment or remove the color fields if they're not available
+        # colors = point_cloud2.read_points(points, field_names=["r", "g", "b"], skip_nans=True)
 
-        colors = point_cloud2.read_points(points, field_names=["r", "g", "b"], skip_nans=True)
+        # colors = point_cloud2.read_points(points, field_names=["r", "g", "b"], skip_nans=True)
 
         pts = structured_to_unstructured(pts)
-        colors = colors = structured_to_unstructured(colors)
+        # colors = colors = structured_to_unstructured(colors)
 
-        # Log points once rigidly under robot/camera/points. This is a robot-centric
-        # view of the world.
-        rr.log("world/robot/camera/points", rr.Points3D(pts, colors=colors))
-        self.log_tf_as_transform3d("world/robot/camera/points", time)
+        # Log only the points if colors are not available
+        rr.log("world/robot/depth_camera/points", rr.Points3D(pts, colors=[255, 0, 0, 255]))
+        self.log_tf_as_transform3d("world/robot/depth_camera/points", time)
 
-        # Log points a second time after transforming to the map frame. This is a map-centric
-        # view of the world.
-        #
-        # Once Rerun supports fixed-frame aware transforms [#1522](https://github.com/rerun-io/rerun/issues/1522)
-        # this will no longer be necessary.
-        rr.log("world/points", rr.Points3D(pts, colors=colors))
-        self.log_tf_as_transform3d("world/points", time)
 
-    # def scan_callback(self, scan: LaserScan) -> None:
-    #     """
-    #     Log a LaserScan after transforming it to line-segments.
+    def odom_callback(self, odom: Odometry) -> None:
+        """Update transforms when odom is updated."""
+        time = Time.from_msg(odom.header.stamp)
+        rr.set_time_nanos("ros_time", time.nanoseconds)
 
-    #     Note: we do a client-side transformation of the LaserScan data into Rerun
-    #     points / lines until Rerun has native support for LaserScan style projections:
-    #     [#1534](https://github.com/rerun-io/rerun/issues/1534)
-    #     """
-    #     time = Time.from_msg(scan.header.stamp)
-    #     rr.set_time_nanos("ros_time", time.nanoseconds)
+        # Capture time-series data for the linear and angular velocities
+        rr.log("odometry/x", rr.Scalar(odom.pose.pose.position.x))
+        rr.log("odometry/y", rr.Scalar(odom.pose.pose.position.y))
+        rr.log("odometry/z", rr.Scalar(odom.pose.pose.position.z))
 
-    #     # Project the laser scan to a collection of points
-    #     points = self.laser_proj.projectLaser(scan)
-    #     pts = point_cloud2.read_points(points, field_names=["x", "y", "z"], skip_nans=True)
-    #     pts = structured_to_unstructured(pts)
+        # Update the robot pose itself via TF
+        self.log_tf_as_transform3d("world/robot", time)
 
-    #     # Turn every pt into a line-segment from the origin to the point.
-    #     origin = (pts / np.linalg.norm(pts, axis=1).reshape(-1, 1)) * 0.3
-    #     segs = np.hstack([origin, pts]).reshape(pts.shape[0] * 2, 3)
 
-    #     rr.log("map/robot/scan", rr.LineStrips3D(segs, radii=0.0025))
-    #     self.log_tf_as_transform3d("map/robot/scan", time)
+    def imu_callback(self, imu: Imu) -> None:
+        """Update transforms when odom is updated."""
+        time = Time.from_msg(imu.header.stamp)
+        rr.set_time_nanos("ros_time", time.nanoseconds)
 
-    # def urdf_callback(self, urdf_msg: String) -> None:
-    #     """Log a URDF using `log_scene` from `rerun_urdf`."""
-    #     urdf = rerun_urdf.load_urdf_from_msg(urdf_msg)
-
-    #     # The turtlebot URDF appears to have scale set incorrectly for the camera-link
-    #     # Although rviz loads it properly `yourdfpy` does not.
-    #     orig, _ = urdf.scene.graph.get("camera_link")
-    #     scale = trimesh.transformations.scale_matrix(0.00254)
-    #     urdf.scene.graph.update(frame_to="camera_link", matrix=orig.dot(scale))
-    #     scaled = urdf.scene.scaled(1.0)
-
-    #     rerun_urdf.log_scene(scene=scaled, node=urdf.base_link, path="map/robot/urdf", static=True)
+        # Capture time-series data for the linear and angular velocities
+        rr.log("imu/orientation/x", rr.Scalar(imu.orientation.x))
+        rr.log("imu/orientation/y", rr.Scalar(imu.orientation.y))
+        rr.log("imu/orientation/z", rr.Scalar(imu.orientation.z))
 
 
 def main() -> None:
