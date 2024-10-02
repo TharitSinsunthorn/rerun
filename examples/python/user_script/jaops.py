@@ -31,7 +31,7 @@ try:
     from rclpy.node import Node
     from rclpy.qos import QoSDurabilityPolicy, QoSProfile
     from rclpy.time import Duration, Time
-    from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointField, Imu
+    from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField, Imu, LaserScan, JointState
     from sensor_msgs_py import point_cloud2
     from std_msgs.msg import String
     from tf2_ros import TransformException
@@ -103,8 +103,16 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
         self.img_sub = self.create_subscription(
             Image,
+            "/depth_cam/rgb",
+            self.rgb_image_callback,
+            10,
+            callback_group=self.callback_group,
+        )
+
+        self.depth_img_sub = self.create_subscription(
+            Image,
             "/depth_cam/depth",
-            self.image_callback,
+            self.depth_image_callback,
             10,
             callback_group=self.callback_group,
         )
@@ -141,6 +149,14 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
             callback_group=self.callback_group,
         )
 
+        self.joint_state_sub = self.create_subscription(
+            JointState,
+            "joint_states",
+            self.joint_states_callback,
+            10,
+            callback_group=self.callback_group,
+        )
+
 
     def log_tf_as_transform3d(self, path: str, time: Time) -> None:
         """
@@ -173,19 +189,27 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
         self.model.fromCameraInfo(info)
 
         rr.log(
-            "world/robot/depth_camera/img",
+            "world/robot/depth_camera/depth_simg",
             rr.Pinhole(
                 resolution=[self.model.width, self.model.height],
                 image_from_camera=self.model.intrinsicMatrix(),
             ),
         )
 
-    def image_callback(self, img: Image) -> None:
+    def rgb_image_callback(self, img: Image) -> None:
         """Log an `Image` with `log_image` using `cv_bridge`."""
         time = Time.from_msg(img.header.stamp)
         rr.set_time_nanos("ros_time", time.nanoseconds)
 
-        rr.log("world/robot/depth_camera/img", rr.Image(self.cv_bridge.imgmsg_to_cv2(img)))
+        rr.log("world/robot/depth_camera/rgb_img", rr.Image(self.cv_bridge.imgmsg_to_cv2(img)))
+        self.log_tf_as_transform3d("world/robot/depth_camera", time)
+
+    def depth_image_callback(self, img: Image) -> None:
+        """Log an `Image` with `log_image` using `cv_bridge`."""
+        time = Time.from_msg(img.header.stamp)
+        rr.set_time_nanos("ros_time", time.nanoseconds)
+
+        rr.log("world/robot/depth_camera/depth_img", rr.Image(self.cv_bridge.imgmsg_to_cv2(img)))
         self.log_tf_as_transform3d("world/robot/depth_camera", time)
 
     def points_callback(self, points: PointCloud2) -> None:
@@ -223,7 +247,7 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
 
 
     def imu_callback(self, imu: Imu) -> None:
-        """Update transforms when odom is updated."""
+        """Log IMU data """
         time = Time.from_msg(imu.header.stamp)
         rr.set_time_nanos("ros_time", time.nanoseconds)
 
@@ -231,6 +255,19 @@ class PragyaanSubscriber(Node):  # type: ignore[misc]
         rr.log("imu/orientation/x", rr.Scalar(imu.orientation.x))
         rr.log("imu/orientation/y", rr.Scalar(imu.orientation.y))
         rr.log("imu/orientation/z", rr.Scalar(imu.orientation.z))
+
+    def joint_states_callback(self, jointstates: JointState) -> None:
+        """ Log Joint states data"""
+        time = Time.from_msg(jointstates.header.stamp)
+        rr.set_time_nanos("ros_time", time.nanoseconds)
+
+        # Capture time-series data for the linear and angular velocities
+        rr.log("joint_states/position/wheel_fl", rr.Scalar(jointstates.position[2]))
+        rr.log("joint_states/position/wheel_fr", rr.Scalar(jointstates.position[4]))
+        rr.log("joint_states/position/wheel_bl", rr.Scalar(jointstates.position[6]))
+        rr.log("joint_states/position/wheel_br", rr.Scalar(jointstates.position[9]))
+        rr.log("joint_states/position/wheel_ml", rr.Scalar(jointstates.position[7]))
+        rr.log("joint_states/position/wheel_mr", rr.Scalar(jointstates.position[8]))
 
 
 def main() -> None:
